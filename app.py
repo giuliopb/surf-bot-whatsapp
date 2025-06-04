@@ -33,15 +33,17 @@ def degrees_to_direction(degrees):
     return dirs[ix]
 
 def fallback_open_meteo(lat, lng):
-    # Chamada resumida de exemplo (Open-Meteo, valores genéricos – ajuste de parâmetros conforme doc)
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&hourly=wave_height,wind_speed&timezone=UTC"
     r = requests.get(url)
     if r.status_code != 200:
         return None
-    # Extraia média/hoje de acordo com a resposta do Open-Meteo (exemplo ilustrativo)
     data = r.json()
-    # ... processar a resposta e gerar uma string simplificada ...
-    return "Fallback Open-Meteo: [altura e vento...]"
+    # Pegue a primeira hora disponível como exemplo:
+    first_hour = data.get('hourly', {}).get('wave_height', [])
+    if not first_hour:
+        return None
+    # Gere uma resposta simples (ajuste conforme necessidade):
+    return f"Fallback Open-Meteo: alt. onda ~{first_hour[0]:.1f} m"
 
 def is_cache_valid(cache_time_str):
     """
@@ -105,14 +107,13 @@ def get_surf_forecast(spot_name):
     response = requests.get(url, headers=headers)
 
     print(f"[API] Consulta Stormglass ({spot_name}): {response.status_code} | URL: {url}")
-    if response.status_code != 200:
-        return 'Não consegui obter a previsão no momento 😞'
 
-    # Após detectar response.status_code == 402 ou data['hours'] vazio:
-    fallback = fallback_open_meteo(LATITUDE, LONGITUDE)
-    if fallback:
-        return fallback
-    return 'Não consegui obter a previsão no momento 😞'
+    if response.status_code == 402:
+        # Tentativa de fallback Open-Meteo (exemplo ilustrativo)
+        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
+        return fb or 'Não consegui obter a previsão no momento 😞'
+    elif response.status_code != 200:
+        return 'Não consegui obter a previsão no momento 😞'
 
     data = response.json()
     forecast_per_day = {}
