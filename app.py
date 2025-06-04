@@ -1,3 +1,4 @@
+
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import requests
@@ -56,12 +57,18 @@ def get_surf_forecast(spot_name):
             forecast_per_day[date_key] = []
 
         try:
-            forecast_per_day[date_key].append({
-                'wave_height': hour_data['waveHeight']['noaa'],
-                'wave_period': hour_data['wavePeriod']['noaa'],
-                'wind_speed': hour_data['windSpeed']['noaa'],
-                'wind_dir': hour_data['windDirection']['noaa']
-            })
+            wh = hour_data['waveHeight']['noaa']
+            wp = hour_data['wavePeriod']['noaa']
+            ws = hour_data['windSpeed']['noaa']
+            wd = hour_data['windDirection']['noaa']
+
+            if None not in (wh, wp, ws, wd):
+                forecast_per_day[date_key].append({
+                    'wave_height': wh,
+                    'wave_period': wp,
+                    'wind_speed': ws,
+                    'wind_dir': wd
+                })
         except KeyError:
             continue
 
@@ -69,6 +76,7 @@ def get_surf_forecast(spot_name):
 
     for day, measures in list(forecast_per_day.items())[:3]:
         if not measures:
+            forecast_msg += f"\n📅 {day.strftime('%d/%m/%Y')}: Dados insuficientes.\n"
             continue
 
         avg_wave_height = sum([m['wave_height'] for m in measures]) / len(measures)
@@ -77,7 +85,8 @@ def get_surf_forecast(spot_name):
         avg_wind_dir = sum([m['wind_dir'] for m in measures]) / len(measures)
         wind_dir_str = degrees_to_direction(avg_wind_dir)
 
-        forecast_msg += f"\n📅 {day.strftime('%d/%m/%Y')}:\n"
+        forecast_msg += f"\n📅 {day.strftime('%d/%m/%Y')}:
+"
         forecast_msg += f"• Ondas: {avg_wave_height:.1f} m / {avg_wave_period:.1f} s\n"
         forecast_msg += f"• Vento: {avg_wind_speed:.1f} m/s ({wind_dir_str})\n"
 
