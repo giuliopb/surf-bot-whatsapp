@@ -7,10 +7,10 @@ import threading
 
 app = Flask(__name__)
 
-# Sua API Key da Stormglass (definida em variável de ambiente no Render)
+# API Key da Stormglass (variável de ambiente no Render)
 STORMGLASS_API_KEY = os.getenv('STORMGLASS_API_KEY')
 
-# Coordenadas de cada praia suportada
+# Coordenadas das praias suportadas
 SPOTS = {
     'balneario': (-26.9931, -48.6350),
     'guarda':    (-27.9496, -48.6189),
@@ -18,38 +18,20 @@ SPOTS = {
     'floripa':   (-27.5954, -48.5480)
 }
 
-# Prioridade de fontes dentro do próprio Stormglass
+# Somente fontes gratuitas no Stormglass
 SOURCES_PRIORITY = ['noaa', 'sg', 'meteo']
 
-# Cache simples em memória: chave = (spot, 'YYYY-MM-DDTHH') → valor = forecast_msg
+# Cache em memória: {(spot, 'YYYY-MM-DDTHH'): forecast_msg}
 CACHE = {}
 CACHE_LOCK = threading.Lock()
-CACHE_TTL_MINUTES = 30  # Tempo de vida de cada entrada do cache em minutos
+CACHE_TTL_MINUTES = 30  # minutos de validade no cache
 
 def degrees_to_direction(degrees):
-    """Converte graus numéricos para ponto cardeal."""
     dirs = ['Norte', 'Nordeste', 'Leste', 'Sudeste', 'Sul', 'Sudoeste', 'Oeste', 'Noroeste']
     ix = int((degrees + 22.5) / 45) % 8
     return dirs[ix]
 
-def fallback_open_meteo(lat, lng):
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&hourly=wave_height,wind_speed&timezone=UTC"
-    r = requests.get(url)
-    if r.status_code != 200:
-        return None
-    data = r.json()
-    # Pegue a primeira hora disponível como exemplo:
-    first_hour = data.get('hourly', {}).get('wave_height', [])
-    if not first_hour:
-        return None
-    # Gere uma resposta simples (ajuste conforme necessidade):
-    return f"Fallback Open-Meteo: alt. onda ~{first_hour[0]:.1f} m"
-
 def is_cache_valid(cache_time_str):
-    """
-    Verifica se o registro em cache ainda está dentro do TTL.
-    cache_time_str vem no formato 'YYYY-MM-DDTHH'.
-    """
     try:
         cache_time_dt = datetime.datetime.strptime(cache_time_str, '%Y-%m-%dT%H').replace(tzinfo=datetime.timezone.utc)
         return (datetime.datetime.now(datetime.timezone.utc) - cache_time_dt).total_seconds() < CACHE_TTL_MINUTES * 60
@@ -57,9 +39,6 @@ def is_cache_valid(cache_time_str):
         return False
 
 def get_cached_forecast(spot):
-    """
-    Retorna a previsão em cache para a hora corrente, se existir e estiver válida.
-    """
     now = datetime.datetime.now(datetime.timezone.utc).replace(minute=0, second=0, microsecond=0)
     key = (spot, now.strftime('%Y-%m-%dT%H'))
     with CACHE_LOCK:
@@ -70,21 +49,49 @@ def get_cached_forecast(spot):
     return None
 
 def set_cached_forecast(spot, forecast_msg):
-    """
-    Armazena a mensagem de previsão em cache, associada à hora atual (UTC).
-    """
     now = datetime.datetime.now(datetime.timezone.utc).replace(minute=0, second=0, microsecond=0)
     key = (spot, now.strftime('%Y-%m-%dT%H'))
     with CACHE_LOCK:
         CACHE[key] = forecast_msg
 
+def fallback_open_meteo(lat, lng):
+    """
+    Fallback usando Open-Meteo: retorna média de altura de onda e vento nas próximas 24 h.
+    """
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lng}"
+        f"&hourly=wave_height,wind_speed"
+        f"&timezone=UTC&forecast_days=1"
+    )
+    try:
+        r = requests.get(url, timeout=10)
+    except:
+        return None
+
+    if r.status_code != 200:
+        return None
+
+    data = r.json().get('hourly', {})
+    waves = data.get('wave_height', [])
+    winds = data.get('wind_speed', [])
+
+    if not waves or not winds:
+        return None
+
+    avg_wave = sum(waves) / len(waves)
+    avg_wind = sum(winds) / len(winds)
+
+    return (
+        f"🌊 Fallback Open-Meteo (24 h):\n"
+        f"• Altura média das ondas: {avg_wave:.1f} m\n"
+        f"• Vento médio: {avg_wind:.1f} m/s\n"
+        f"ℹ️ Dados de outra fonte gratuita."
+    )
+
 def get_surf_forecast(spot_name):
-    """
-    Retorna a previsão de surf para um spot em até 3 dias.
-    Faz fallback automático entre fontes, aplica cache e trata dados faltantes.
-    """
     if spot_name not in SPOTS:
-        return "Praia não encontrada. Use por ex.: surf balneario"
+        return "Praia não encontrada. Exemplo: surf balneario"
 
     # 1) Verifica cache
     cached = get_cached_forecast(spot_name)
@@ -94,7 +101,7 @@ def get_surf_forecast(spot_name):
     LATITUDE, LONGITUDE = SPOTS[spot_name]
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    end_time = now + datetime.timedelta(hours=24)
+    end_time = now + datetime.timedelta(hours=24)  # apenas 24 h
     end = end_time.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     url = (
@@ -104,37 +111,49 @@ def get_surf_forecast(spot_name):
         f'&start={start}&end={end}'
     )
     headers = {'Authorization': STORMGLASS_API_KEY}
-    response = requests.get(url, headers=headers)
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+    except:
+        # Se der timeout ou falha de rede, vai para fallback
+        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
+        return fb or 'Não consegui obter a previsão no momento 😞'
 
     print(f"[API] Consulta Stormglass ({spot_name}): {response.status_code} | URL: {url}")
 
+    # 2) Se retornar 402, tenta fallback
     if response.status_code == 402:
-        # Tentativa de fallback Open-Meteo (exemplo ilustrativo)
+        print(f"[Stormglass] 402 para {spot_name}, ativando fallback Open-Meteo.")
         fb = fallback_open_meteo(LATITUDE, LONGITUDE)
         return fb or 'Não consegui obter a previsão no momento 😞'
-    elif response.status_code != 200:
+
+    # 3) Se for outro erro, exibe mensagem de problema
+    if response.status_code != 200:
         return 'Não consegui obter a previsão no momento 😞'
 
     data = response.json()
-    forecast_per_day = {}
+    hours = data.get('hours', [])
 
-    # 2) Organizar dados por dia, extraindo valores segundo prioridade de fontes
-    for hour_data in data.get('hours', []):
+    # 4) Se vier sem dados, fallback
+    if not hours:
+        print(f"[Stormglass] Sem dados válidos para {spot_name}, fallback Open-Meteo.")
+        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
+        return fb or 'Dados insuficientes para gerar a previsão no momento 😞'
+
+    # 5) Organiza dados por dia, usando apenas fontes gratuitas
+    forecast_per_day = {}
+    for hour_data in hours:
         time_str = hour_data.get('time')
         if not time_str:
             continue
         try:
-            # Converte string "YYYY-MM-DDTHH:MM:SSZ" → datetime UTC
             time_obj = datetime.datetime.fromisoformat(time_str.replace("Z", "+00:00"))
         except:
             continue
         date_key = time_obj.date()
-
         if date_key not in forecast_per_day:
             forecast_per_day[date_key] = []
 
         def get_param_value(param_name):
-            # Retorna o primeiro valor não-nulo da lista de fontes, se existir
             for src in SOURCES_PRIORITY:
                 val = hour_data.get(param_name, {}).get(src)
                 if val is not None:
@@ -146,7 +165,6 @@ def get_surf_forecast(spot_name):
         ws = get_param_value('windSpeed')
         wd = get_param_value('windDirection')
 
-        # Se qualquer parâmetro for None, ignora esta hora
         if None not in (wh, wp, ws, wd):
             forecast_per_day[date_key].append({
                 'wave_height': wh,
@@ -155,29 +173,28 @@ def get_surf_forecast(spot_name):
                 'wind_dir': wd
             })
 
-    # 3) Montar a mensagem para até 3 dias
-    forecast_msg = f'🌊 Previsão para {spot_name.title()} (3 dias):\n'
-    days = list(forecast_per_day.keys())[:3]
-    for day in days:
-        measures = forecast_per_day.get(day, [])
-        if not measures:
-            forecast_msg += f"\n📅 {day.strftime('%d/%m/%Y')}: Dados insuficientes.\n"
-            continue
+    # 6) Monta mensagem para as próximas 24 h (dia atual)
+    forecast_msg = f'🌊 Previsão para {spot_name.title()} (próximas 24 h):\n'
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    measures = forecast_per_day.get(today, [])
 
-        # Calcula média de cada parâmetro
-        avg_wave_height = sum(m['wave_height'] for m in measures) / len(measures)
-        avg_wave_period = sum(m['wave_period'] for m in measures) / len(measures)
-        avg_wind_speed = sum(m['wind_speed'] for m in measures) / len(measures)
-        avg_wind_dir = sum(m['wind_dir'] for m in measures) / len(measures)
-        wind_dir_str = degrees_to_direction(avg_wind_dir)
+    if not measures:
+        print(f"[Stormglass] Sem dados válidos hoje em {spot_name}, fallback Open-Meteo.")
+        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
+        return fb or 'Dados insuficientes para gerar a previsão no momento 😞'
 
-        forecast_msg += (
-            f"\n📅 {day.strftime('%d/%m/%Y')}:\n"
-            f"• Ondas: {avg_wave_height:.1f} m / {avg_wave_period:.1f} s\n"
-            f"• Vento: {avg_wind_speed:.1f} m/s ({wind_dir_str})\n"
-        )
+    avg_wave_height = sum(m['wave_height'] for m in measures) / len(measures)
+    avg_wave_period = sum(m['wave_period'] for m in measures) / len(measures)
+    avg_wind_speed = sum(m['wind_speed'] for m in measures) / len(measures)
+    avg_wind_dir = sum(m['wind_dir'] for m in measures) / len(measures)
+    wind_dir_str = degrees_to_direction(avg_wind_dir)
 
-    # 4) Armazena no cache antes de retornar
+    forecast_msg += (
+        f"\n• Ondas: {avg_wave_height:.1f} m / {avg_wave_period:.1f} s\n"
+        f"• Vento: {avg_wind_speed:.1f} m/s ({wind_dir_str})\n"
+    )
+
+    # 7) Armazena no cache e retorna
     set_cached_forecast(spot_name, forecast_msg)
     return forecast_msg
 
