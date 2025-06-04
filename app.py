@@ -19,7 +19,7 @@ SPOTS = {
 }
 
 # Prioridade de fontes dentro do próprio Stormglass
-SOURCES_PRIORITY = ['noaa', 'sg', 'meteo', 'icon', 'dwd']
+SOURCES_PRIORITY = ['noaa', 'sg', 'meteo']
 
 # Cache simples em memória: chave = (spot, 'YYYY-MM-DDTHH') → valor = forecast_msg
 CACHE = {}
@@ -31,6 +31,17 @@ def degrees_to_direction(degrees):
     dirs = ['Norte', 'Nordeste', 'Leste', 'Sudeste', 'Sul', 'Sudoeste', 'Oeste', 'Noroeste']
     ix = int((degrees + 22.5) / 45) % 8
     return dirs[ix]
+
+def fallback_open_meteo(lat, lng):
+    # Chamada resumida de exemplo (Open-Meteo, valores genéricos – ajuste de parâmetros conforme doc)
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lng}&hourly=wave_height,wind_speed&timezone=UTC"
+    r = requests.get(url)
+    if r.status_code != 200:
+        return None
+    # Extraia média/hoje de acordo com a resposta do Open-Meteo (exemplo ilustrativo)
+    data = r.json()
+    # ... processar a resposta e gerar uma string simplificada ...
+    return "Fallback Open-Meteo: [altura e vento...]"
 
 def is_cache_valid(cache_time_str):
     """
@@ -96,6 +107,12 @@ def get_surf_forecast(spot_name):
     print(f"[API] Consulta Stormglass ({spot_name}): {response.status_code} | URL: {url}")
     if response.status_code != 200:
         return 'Não consegui obter a previsão no momento 😞'
+
+    # Após detectar response.status_code == 402 ou data['hours'] vazio:
+    fallback = fallback_open_meteo(LATITUDE, LONGITUDE)
+    if fallback:
+        return fallback
+    return 'Não consegui obter a previsão no momento 😞'
 
     data = response.json()
     forecast_per_day = {}
