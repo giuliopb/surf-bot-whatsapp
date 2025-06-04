@@ -81,7 +81,7 @@ def get_surf_forecast(spot_name):
     LATITUDE, LONGITUDE = SPOTS[spot_name]
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    end_time = now + datetime.timedelta(days=3)
+    end_time = now + datetime.timedelta(hours=24)
     end = end_time.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     url = (
