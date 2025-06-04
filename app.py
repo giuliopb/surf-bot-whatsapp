@@ -55,15 +55,10 @@ def get_surf_forecast(spot_name):
         wind_direction = first_hour['windDirection']['noaa']
 
         forecast = (
-            f'🌊 Previsão para {spot_name.title()}:
-
-'
-            f'• Altura: {wave_height:.1f} m
-'
-            f'• Período: {wave_period:.1f} s
-'
-            f'• Vento: {wind_speed:.1f} m/s ({wind_direction:.0f}°)
-'
+            f'🌊 Previsão para {spot_name.title()}:\n\n'
+            f'• Altura: {wave_height:.1f} m\n'
+            f'• Período: {wave_period:.1f} s\n'
+            f'• Vento: {wind_speed:.1f} m/s ({wind_direction:.0f}°)\n'
             f'📅 Atualizado: {now.strftime("%d/%m/%Y %H:%M")} UTC'
         )
 
