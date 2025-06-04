@@ -7,10 +7,8 @@ import threading
 
 app = Flask(__name__)
 
-# API Key da Stormglass (variável de ambiente no Render)
 STORMGLASS_API_KEY = os.getenv('STORMGLASS_API_KEY')
 
-# Coordenadas das praias suportadas
 SPOTS = {
     'balneario': (-26.9931, -48.6350),
     'guarda':    (-27.9496, -48.6189),
@@ -18,13 +16,12 @@ SPOTS = {
     'floripa':   (-27.5954, -48.5480)
 }
 
-# Somente fontes gratuitas no Stormglass
+# Só fontes gratuitas
 SOURCES_PRIORITY = ['noaa', 'sg', 'meteo']
 
-# Cache em memória: {(spot, 'YYYY-MM-DDTHH'): forecast_msg}
 CACHE = {}
 CACHE_LOCK = threading.Lock()
-CACHE_TTL_MINUTES = 30  # minutos de validade no cache
+CACHE_TTL_MINUTES = 30
 
 def degrees_to_direction(degrees):
     dirs = ['Norte', 'Nordeste', 'Leste', 'Sudeste', 'Sul', 'Sudoeste', 'Oeste', 'Noroeste']
@@ -56,7 +53,7 @@ def set_cached_forecast(spot, forecast_msg):
 
 def fallback_open_meteo(lat, lng):
     """
-    Fallback usando Open-Meteo: retorna média de altura de onda e vento nas próximas 24 h.
+    Fallback usando Open-Meteo (24 h). Se não houver dados, retorna mensagem padrão.
     """
     url = (
         f"https://api.open-meteo.com/v1/forecast"
@@ -67,26 +64,26 @@ def fallback_open_meteo(lat, lng):
     try:
         r = requests.get(url, timeout=10)
     except:
-        return None
+        # Se falhar rede/time-out
+        return "Fallback: falha ao checar Open-Meteo. Tente novamente mais tarde."
 
     if r.status_code != 200:
-        return None
+        return "Fallback: Open-Meteo indisponível agora. Tente novamente mais tarde."
 
-    data = r.json().get('hourly', {})
-    waves = data.get('wave_height', [])
-    winds = data.get('wind_speed', [])
+    hourly = r.json().get('hourly', {})
+    waves = hourly.get('wave_height', [])
+    winds = hourly.get('wind_speed', [])
 
     if not waves or not winds:
-        return None
+        return "Fallback: sem dados válidos do Open-Meteo. Tente novamente mais tarde."
 
     avg_wave = sum(waves) / len(waves)
     avg_wind = sum(winds) / len(winds)
-
     return (
         f"🌊 Fallback Open-Meteo (24 h):\n"
         f"• Altura média das ondas: {avg_wave:.1f} m\n"
         f"• Vento médio: {avg_wind:.1f} m/s\n"
-        f"ℹ️ Dados de outra fonte gratuita."
+        f"ℹ️ Dados via Open-Meteo."
     )
 
 def get_surf_forecast(spot_name):
@@ -101,7 +98,7 @@ def get_surf_forecast(spot_name):
     LATITUDE, LONGITUDE = SPOTS[spot_name]
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-    end_time = now + datetime.timedelta(hours=24)  # apenas 24 h
+    end_time = now + datetime.timedelta(hours=24)
     end = end_time.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
     url = (
@@ -114,87 +111,82 @@ def get_surf_forecast(spot_name):
     try:
         response = requests.get(url, headers=headers, timeout=10)
     except:
-        # Se der timeout ou falha de rede, vai para fallback
-        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
-        return fb or 'Não consegui obter a previsão no momento 😞'
+        # Falha de rede ou timeout
+        return fallback_open_meteo(LATITUDE, LONGITUDE)
 
     print(f"[API] Consulta Stormglass ({spot_name}): {response.status_code} | URL: {url}")
 
-    # 2) Se retornar 402, tenta fallback
     if response.status_code == 402:
+        # Agora cai direto no fallback Open-Meteo
         print(f"[Stormglass] 402 para {spot_name}, ativando fallback Open-Meteo.")
-        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
-        return fb or 'Não consegui obter a previsão no momento 😞'
+        return fallback_open_meteo(LATITUDE, LONGITUDE)
 
-    # 3) Se for outro erro, exibe mensagem de problema
     if response.status_code != 200:
-        return 'Não consegui obter a previsão no momento 😞'
+        return "Não consegui obter a previsão no momento 😞"
 
     data = response.json()
     hours = data.get('hours', [])
 
-    # 4) Se vier sem dados, fallback
     if not hours:
+        # Mesmo que seja 200, mas sem horas válidas
         print(f"[Stormglass] Sem dados válidos para {spot_name}, fallback Open-Meteo.")
-        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
-        return fb or 'Dados insuficientes para gerar a previsão no momento 😞'
+        return fallback_open_meteo(LATITUDE, LONGITUDE)
 
-    # 5) Organiza dados por dia, usando apenas fontes gratuitas
+    # 2) Organiza dados do dia atual
     forecast_per_day = {}
     for hour_data in hours:
-        time_str = hour_data.get('time')
-        if not time_str:
+        t = hour_data.get('time')
+        if not t:
             continue
         try:
-            time_obj = datetime.datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+            d = datetime.datetime.fromisoformat(t.replace("Z", "+00:00"))
         except:
             continue
-        date_key = time_obj.date()
-        if date_key not in forecast_per_day:
-            forecast_per_day[date_key] = []
+        dia = d.date()
+        if dia not in forecast_per_day:
+            forecast_per_day[dia] = []
 
-        def get_param_value(param_name):
+        def get_param(p):
             for src in SOURCES_PRIORITY:
-                val = hour_data.get(param_name, {}).get(src)
+                val = hour_data.get(p, {}).get(src)
                 if val is not None:
                     return val
             return None
 
-        wh = get_param_value('waveHeight')
-        wp = get_param_value('wavePeriod')
-        ws = get_param_value('windSpeed')
-        wd = get_param_value('windDirection')
+        wh = get_param('waveHeight')
+        wp = get_param('wavePeriod')
+        ws = get_param('windSpeed')
+        wd = get_param('windDirection')
 
         if None not in (wh, wp, ws, wd):
-            forecast_per_day[date_key].append({
+            forecast_per_day[dia].append({
                 'wave_height': wh,
                 'wave_period': wp,
                 'wind_speed': ws,
                 'wind_dir': wd
             })
 
-    # 6) Monta mensagem para as próximas 24 h (dia atual)
-    forecast_msg = f'🌊 Previsão para {spot_name.title()} (próximas 24 h):\n'
-    today = datetime.datetime.now(datetime.timezone.utc).date()
+    # 3) Monta mensagem para as próximas 24 h (dia atual)
+    today = now.date()
     measures = forecast_per_day.get(today, [])
-
     if not measures:
-        print(f"[Stormglass] Sem dados válidos hoje em {spot_name}, fallback Open-Meteo.")
-        fb = fallback_open_meteo(LATITUDE, LONGITUDE)
-        return fb or 'Dados insuficientes para gerar a previsão no momento 😞'
+        # Caso sem dados válidos, fallback
+        print(f"[Stormglass] Sem dados hoje para {spot_name}, fallback Open-Meteo.")
+        return fallback_open_meteo(LATITUDE, LONGITUDE)
 
-    avg_wave_height = sum(m['wave_height'] for m in measures) / len(measures)
-    avg_wave_period = sum(m['wave_period'] for m in measures) / len(measures)
-    avg_wind_speed = sum(m['wind_speed'] for m in measures) / len(measures)
-    avg_wind_dir = sum(m['wind_dir'] for m in measures) / len(measures)
-    wind_dir_str = degrees_to_direction(avg_wind_dir)
+    avg_wh = sum(m['wave_height'] for m in measures) / len(measures)
+    avg_wp = sum(m['wave_period'] for m in measures) / len(measures)
+    avg_ws = sum(m['wind_speed'] for m in measures) / len(measures)
+    avg_wd = sum(m['wind_dir'] for m in measures) / len(measures)
+    dir_str = degrees_to_direction(avg_wd)
 
-    forecast_msg += (
-        f"\n• Ondas: {avg_wave_height:.1f} m / {avg_wave_period:.1f} s\n"
-        f"• Vento: {avg_wind_speed:.1f} m/s ({wind_dir_str})\n"
+    forecast_msg = (
+        f"🌊 Previsão para {spot_name.title()} (próximas 24 h):\n"
+        f"• Ondas: {avg_wh:.1f} m / {avg_wp:.1f} s\n"
+        f"• Vento: {avg_ws:.1f} m/s ({dir_str})\n"
     )
 
-    # 7) Armazena no cache e retorna
+    # 4) Guarda no cache e retorna
     set_cached_forecast(spot_name, forecast_msg)
     return forecast_msg
 
@@ -209,13 +201,16 @@ def whatsapp_reply():
         if len(partes) >= 2:
             spot = partes[1]
             forecast = get_surf_forecast(spot)
+            print(f"[Bot] Resposta gerada: {forecast}")
             msg.body(forecast)
         else:
             msg.body("Informe a praia. Exemplo: surf balneario")
     else:
         msg.body("Envie no formato: surf [praia]. Exemplo: surf itajai")
 
-    return str(resp)
+    twiml = str(resp)
+    print(f"[TwiML] {twiml}")
+    return twiml
 
 if __name__ == "__main__":
     app.run(debug=True)
